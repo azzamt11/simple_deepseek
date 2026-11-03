@@ -266,16 +266,203 @@ Here, \lVert \cdot \rVert represents the distance between vectors.
 
 
 --------------------------------------------------------------
-Score:
+Score: 7.5/10
 Comment:
+Good first implementation. Your code runs the complete token-ID to embedding
+lookup flow, uses torch.long correctly, adds the requested shape assertions, and
+successfully refactors the work into make_token_ids() and lookup_embeddings().
+
+Answer review:
+
+1. Mostly correct. token_ids must contain integer values because they are used
+   as row indices. The important reason is indexing, not merely that the table
+   may be large.
+
+2. Correct. The sequence-length dimension changes from 4 to 6, so the shape
+   changes from [2, 4, 8] to [2, 6, 8].
+
+3. Needs correction. Changing the embedding size from 8 to 16 changes the last
+   dimension, not the vocabulary size. The shape changes from [2, 4, 8] to
+   [2, 4, 16]. The vocabulary size is the first dimension of embedding_table.
+
+4. Needs correction. We need one output score for every vocabulary item because
+   the model must choose which token is most likely to come next. If the
+   vocabulary has V tokens, the output logits contain V scores:
+
+       logits \in \mathbb{R}^{V}
+
+   Backpropagation uses these scores to update parameters, but that is the
+   training consequence, not the reason for having one score per token.
+
+Code comments:
+
+* The functions are correctly separated and the tensor shapes are correct.
+* Using random token IDs is a useful improvement for testing general shapes.
+* The spelling and spacing in comments can be cleaned up later; it does not
+  affect correctness.
+* Next, add type hints and a small test that verifies an individual token ID
+  selects exactly the expected row from the embedding table.
 
 
 ==============================================================
-LESSON 2 - (put the title here)
+LESSON 2 - From embeddings to logits with nn.Module
 ==============================================================
 
+Goal
+----
+Learn how PyTorch packages learnable tensors inside an `nn.Module`, and how a
+language model turns hidden states into one score for every vocabulary token.
 
-(content)
+Reference rule
+--------------
+Continue using the official DeepSeek-V3 repository as the source of truth:
+
+    https://github.com/deepseek-ai/DeepSeek-V3
+
+Open `inference/model.py` and find the `Transformer` class. Pay attention to
+these ideas:
+
+* the model stores configuration values such as vocabulary size and hidden size;
+* the model has an input embedding layer;
+* the final output is projected to vocabulary-sized logits.
+
+We are not copying the large DeepSeek-V3 model yet. We are isolating the same
+input/output idea in a tiny model.
+
+Part 1: create a tiny language-model module
+--------------------------------------------
+Create this file:
+
+    src/lesson02_logits.py
+
+Put this code in it:
+
+    import torch
+    from torch import nn
+
+
+    class TinyLanguageModel(nn.Module):
+        def __init__(self, vocab_size, hidden_size):
+            super().__init__()
+            self.embedding = nn.Embedding(vocab_size, hidden_size)
+            self.output = nn.Linear(hidden_size, vocab_size)
+
+        def forward(self, token_ids):
+            hidden_states = self.embedding(token_ids)
+            logits = self.output(hidden_states)
+            return logits
+
+
+    def main():
+        batch_size = 2
+        seq_len = 4
+        vocab_size = 100
+        hidden_size = 8
+
+        token_ids = torch.randint(
+            low=0,
+            high=vocab_size,
+            size=(batch_size, seq_len),
+            dtype=torch.long,
+        )
+
+        model = TinyLanguageModel(vocab_size, hidden_size)
+        logits = model(token_ids)
+
+        print("token_ids shape:", token_ids.shape)
+        print("logits shape:", logits.shape)
+
+        assert logits.shape == (batch_size, seq_len, vocab_size)
+
+
+    if __name__ == "__main__":
+        main()
+
+Run it:
+
+    python src/lesson02_logits.py
+
+Expected output shape
+---------------------
+
+    token_ids: [2, 4]
+    hidden_states: [2, 4, 8]
+    logits: [2, 4, 100]
+
+The linear layer applies the same mathematical transformation at every token
+position:
+
+    z = hW^T + b
+
+where
+
+    h \in \mathbb{R}^{8}
+    W \in \mathbb{R}^{100 \times 8}
+    b \in \mathbb{R}^{100}
+    z \in \mathbb{R}^{100}
+
+The 100 values in z are the logits: one unnormalized score for each possible
+next token. A larger score means that the model currently prefers that token,
+although logits are not probabilities yet.
+
+Why nn.Module matters
+---------------------
+`nn.Module` gives PyTorch a place to register learnable parameters. Inspect
+them by adding:
+
+    for name, parameter in model.named_parameters():
+        print(name, parameter.shape, parameter.requires_grad)
+
+You should see parameters belonging to the embedding and linear layers. The
+embedding and linear weights start with random values. Training changes them.
+
+Part 2: connect the dimensions mathematically
+-----------------------------------------------
+Write down the dimensions for this example:
+
+    E \in \mathbb{R}^{100 \times 8}
+    H \in \mathbb{R}^{2 \times 4 \times 8}
+    W \in \mathbb{R}^{100 \times 8}
+    Z \in \mathbb{R}^{2 \times 4 \times 100}
+
+At one position, the operation is:
+
+    z_{b,s,:} = h_{b,s,:} W^T + b
+
+The batch and sequence dimensions are preserved. Only the last dimension is
+changed from hidden_size to vocab_size.
+
+Part 3: one experiment
+----------------------
+Change `vocab_size` from 100 to 50. Run the program and observe that:
+
+    logits.shape == (2, 4, 50)
+
+Then change `hidden_size` from 8 to 16. Observe that the logits shape remains
+
+    (2, 4, 100)
+
+but the internal hidden-state size and the number of parameters change.
+
+Clues, not answers
+------------------
+1. Why does `nn.Embedding` require token IDs to be integers?
+2. Why does the output layer have `out_features=vocab_size`?
+3. Which layer knows about the hidden size, and which layer knows about the
+   vocabulary size?
+4. Why are logits called “unnormalized” scores?
+
+Refactoring checkpoint
+----------------------
+Add a `hidden_states` print statement in `forward`, then remove it after you
+have observed the shape. Keep `forward` short and let `main()` handle the
+experiment and printing.
+
+Do not add softmax yet. In the next lesson we will explain logits, probabilities,
+and the loss function separately. Understanding the difference is important for
+reading the generation and training logic around the official implementation.
+
+
 
 
 --------------------------------------------------------------
