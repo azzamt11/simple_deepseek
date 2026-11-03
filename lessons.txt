@@ -1,0 +1,283 @@
+Learning Machine Learning Deepseek V3
+:::::::::::::::::::::::::::::::::::::
+
+==============================================================
+LESSON 1 - Read the map: tokens, tensors, and model configuration
+==============================================================
+
+Goal
+----
+Understand the shape of the problem before writing a Transformer: text becomes
+integer token IDs, token IDs become tensors, and a model configuration describes
+the dimensions used by every layer.
+
+Reference rule
+--------------
+Use the official DeepSeek-V3 repository as the source of truth:
+
+https://github.com/deepseek-ai/DeepSeek-V3
+
+For this lesson, inspect these files in that repository:
+
+* inference/model.py
+* inference/generate.py
+* inference/configs/config_16B.json
+
+Do not copy the whole model yet. We are going to reproduce its ideas in tiny
+dimensions so that every tensor fits in your head and on your computer.
+
+Part 1: create the first files
+------------------------------
+Create this structure in our repository:
+
+    simple_deepseek/
+    ├── lessons.txt
+    └── src/
+        ├── __init__.py
+        └── lesson01_tensors.py
+
+Put this code in src/lesson01_tensors.py:
+
+    import torch
+
+
+    def main():
+        # A batch of 2 sequences, each containing 4 token IDs.
+        token_ids = torch.tensor([
+            [10, 23, 7, 4],
+            [10, 91, 7, 4],
+        ], dtype=torch.long)
+
+        print("token_ids:", token_ids)
+        print("shape:", token_ids.shape)
+        print("dtype:", token_ids.dtype)
+
+        # A tiny embedding table: 100 possible tokens -> vectors of size 8.
+        embedding_table = torch.randn(100, 8)
+        hidden_states = embedding_table[token_ids]
+
+        print("hidden_states shape:", hidden_states.shape)
+
+
+    if __name__ == "__main__":
+        main()
+
+Run it with:
+
+    python src/lesson01_tensors.py
+
+Expected shapes
+---------------
+
+    token_ids       [2, 4]
+    embedding_table [100, 8]
+    hidden_states   [2, 4, 8]
+
+Read [2, 4, 8] as:
+
+    batch size = 2
+    sequence length = 4
+    hidden size = 8
+
+The embedding lookup is not ordinary matrix multiplication in this example.
+Each integer selects one row from the embedding table. This is the first bridge
+between language and neural-network numbers.
+
+Part 2: connect this to DeepSeek-V3
+------------------------------------
+Open inference/model.py and locate the model configuration class and the
+Transformer class. Do not try to understand every line. Find the names that
+describe dimensions and count them. In particular, notice that the real model
+uses a vocabulary size, hidden dimension, number of layers, attention-related
+dimensions, and expert-related dimensions.
+
+Open inference/configs/config_16B.json and compare its numbers with our tiny
+example. The JSON is data; model.py uses that data to decide how large tensors
+and layers must be.
+
+Important distinction:
+
+    token IDs are integer labels
+    hidden states are floating-point vectors
+    logits are floating-point scores for the next token
+
+Part 3: one small experiment
+-----------------------------
+Change the two input sequences so only one token differs. Run the program again.
+Observe that the corresponding embedding vector changes, while the other
+positions remain unchanged.
+
+Then add these two assertions after the hidden_states line:
+
+    assert hidden_states.shape == (2, 4, 8)
+    assert token_ids.dtype == torch.long
+
+Assertions are executable explanations: they make our intended contract fail
+loudly if a future refactor breaks it.
+
+Clues, not answers
+------------------
+1. Why must token_ids use torch.long instead of torch.float32 for indexing?
+2. Which dimension would change if we increased the sequence length from 4 to 6?
+3. Which dimension would change if we changed the embedding size from 8 to 16?
+4. In a language model, why do we need one output score per vocabulary item?
+
+Write your answers below this lesson before starting Lesson 2. Keep them short;
+the purpose is to reveal what is still unclear.
+
+[my_answer]
+1. Because they will be used to index the embedding_table which will be enourmously big based on the size of vocabulary
+2. It will change the hidden_states.dim[1], that is the seq_len of the hidden_stats
+3. It will change the hidden_states.dim[2], that is the vocab_size of the hidden_states
+4. To make some backprops to adjust the value of the embedding_table row entries.
+
+Refactoring checkpoint
+----------------------
+After the experiment works, refactor the script into two functions:
+
+    make_token_ids() -> torch.Tensor
+    lookup_embeddings(token_ids, embedding_table) -> torch.Tensor
+
+Keep main() responsible only for calling the functions and printing results.
+Do not add a class yet. We will introduce nn.Module only after the tensor flow
+is clear.
+
+How this grows into DeepSeek-V3
+-------------------------------
+The real inference path eventually does roughly this:
+
+    text -> tokenizer -> token IDs -> embedding vectors
+         -> repeated Transformer layers -> logits -> next-token selection
+
+DeepSeek-V3 then adds its distinctive architecture, including Multi-head Latent
+Attention and DeepSeekMoE. We will reach those only after building the ordinary
+tensor and Transformer foundations one small piece at a time.
+
+[question]: I still dont know what is the point of setting these arrays, can you describe it in mathematical way in latex?
+
+[answer]:
+
+The “arrays” are tensors representing data flowing through the model.
+
+1. Token IDs
+------------
+
+The tensor
+
+    token_ids = torch.tensor([
+        [10, 23, 7, 4],
+        [10, 91, 7, 4],
+    ])
+
+can be written mathematically as
+
+    X = \begin{bmatrix}
+        10 & 23 & 7 & 4 \\
+        10 & 91 & 7 & 4
+    \end{bmatrix}
+
+Its shape is
+
+    X \in \mathbb{N}^{2 \times 4}
+
+The first dimension means that we have 2 sequences. The second dimension
+means that every sequence contains 4 token positions. Each integer is an ID
+representing one token. The IDs are labels; they do not contain useful meaning
+by themselves.
+
+2. Embedding table
+------------------
+
+The tensor
+
+    embedding_table = torch.randn(100, 8)
+
+is a matrix
+
+    E \in \mathbb{R}^{100 \times 8}
+
+This means that the vocabulary contains 100 possible tokens and that every
+token is represented by an 8-dimensional vector. For token ID 10, we select
+row 10:
+
+    E_{10} = \begin{bmatrix}
+        e_{10,1} & e_{10,2} & \dots & e_{10,8}
+    \end{bmatrix}
+
+Therefore, the integer token ID 10 becomes the vector
+
+    E_{10} \in \mathbb{R}^{8}
+
+The values in this vector are learned during training.
+
+3. Hidden states
+----------------
+
+When we write
+
+    hidden_states = embedding_table[token_ids]
+
+we perform the operation
+
+    H_{b,s,:} = E_{X_{b,s}}
+
+For every batch index b and sequence-position index s, we select the row of E
+whose index is the token ID at X_{b,s}.
+
+The output has shape
+
+    H \in \mathbb{R}^{2 \times 4 \times 8}
+
+because there are 2 sequences, 4 token positions per sequence, and each token
+has become an 8-dimensional vector.
+
+Conceptually, the operation is
+
+    \begin{bmatrix}
+        10 & 23 & 7 & 4 \\
+        10 & 91 & 7 & 4
+    \end{bmatrix}
+    \quad\longrightarrow\quad
+    \begin{bmatrix}
+        E_{10} & E_{23} & E_7 & E_4 \\
+        E_{10} & E_{91} & E_7 & E_4
+    \end{bmatrix}
+
+The purpose is to transform discrete language into continuous numerical
+vectors that neural-network layers can process.
+
+The general language-model flow is
+
+    \text{text}
+    \longrightarrow \text{token IDs}
+    \longrightarrow \text{embedding vectors}
+    \longrightarrow \text{Transformer layers}
+    \longrightarrow \text{logits}
+
+The embedding table starts with random values. During training, its values are
+updated so that the vectors become useful for prediction. For example, related
+tokens may eventually have smaller distances between their vectors:
+
+    \lVert E_{\text{cat}} - E_{\text{dog}} \rVert
+    <
+    \lVert E_{\text{cat}} - E_{\text{airplane}} \rVert
+
+Here, \lVert \cdot \rVert represents the distance between vectors.
+
+
+--------------------------------------------------------------
+Score:
+Comment:
+
+
+==============================================================
+LESSON 2 - (put the title here)
+==============================================================
+
+
+(content)
+
+
+--------------------------------------------------------------
+Score:
+Comment:
