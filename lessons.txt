@@ -775,3 +775,115 @@ and encourages it to become larger than the scores for the other tokens.
 DeepSeek-V3 follows this same general idea: its Transformer layers produce
 hidden states, and the final projection converts each hidden state into
 vocabulary-sized logits.
+
+
+Practice exercise - Build a toy next-token learner
+--------------------------------------------------
+
+Build a small training program in `src/lesson03_practice.py`. Your program must
+teach `TinyLanguageModel` one simple repeated pattern, without using a real
+text dataset.
+
+The task
+--------
+
+Use this sequence as your training input:
+
+    [4, 10, 7, 2, 4, 10, 7, 2]
+
+Create training pairs from it so that each token is asked to predict the token
+that comes immediately after it. The final token should be handled deliberately:
+either omit it from the inputs or explain why it has no next-token target.
+
+Build the program so it:
+
+* creates input token IDs and target token IDs;
+* creates a `TinyLanguageModel`;
+* computes cross-entropy loss;
+* trains the model for multiple iterations using an optimizer;
+* prints the loss occasionally so we can observe learning;
+* evaluates the model after training by printing the predicted token ID for each
+  input position.
+
+Success criteria
+----------------
+
+Your completed program should demonstrate that:
+
+1. Input and target tensors have compatible batch and sequence dimensions.
+2. The logits have one score for every vocabulary item.
+3. `loss.backward()` creates gradients before `optimizer.step()`.
+4. The loss generally becomes lower over many training iterations.
+5. The model's predicted token IDs increasingly match the target token IDs.
+
+Constraints
+-----------
+
+* Use the existing `TinyLanguageModel` design from Lesson 2.
+* Use `nn.CrossEntropyLoss`.
+* Use an optimizer such as `torch.optim.SGD`.
+* Do not use a tokenizer, a data loader, softmax, or a pretrained model.
+* Do not copy the final solution from an earlier explanation; decide the tensor
+  shapes and training loop yourself.
+
+Questions to answer below this exercise
+-----------------------------------------
+
+1. Why is the target sequence shorter than or aligned differently from the
+   original sequence?
+2. Why does the model make one prediction at every input position?
+3. Why does the loss usually decrease over repeated updates instead of after
+   merely constructing the model?
+4. What does `argmax` do when converting logits into predicted token IDs?
+5. Why would this toy learner memorize the pattern rather than understand
+   language?
+
+
+--------------------------------------------------------------
+Score: 2.5/10
+Comment:
+The model class itself is correct, and you correctly reused the embedding plus
+linear-logit architecture. However, the practice program currently stops at a
+SyntaxError, so it has not yet completed the training exercise.
+
+Main issues:
+
+1. `token_ids.shift(-1)` is not a PyTorch tensor operation. To create
+   next-token pairs, use slicing. For a sequence `[4, 10, 7, 2]`, the input is
+   `[4, 10, 7]` and the target is `[10, 7, 2]`:
+
+       token_ids = sequence[:, :-1]
+       targets = sequence[:, 1:]
+
+2. The input and target sequence lengths must match. If the original sequence
+   has length 4, both tensors used for the loss should have length 3 after the
+   shift.
+
+3. You perform only one optimizer update. The exercise asks for multiple
+   iterations so the model can learn the repeated pattern.
+
+4. `updated_logits.shift(-1)` is also invalid and is conceptually wrong. The
+   targets do not come from the model's predictions; they remain the known
+   correct target tensor.
+
+5. There is a missing comma between the two arguments in the second
+   `loss_function(...)` call:
+
+       updated_logits.reshape(-1, vocab_size),
+       targets.reshape(-1),
+
+6. Print predicted token IDs rather than the entire logits tensor. After the
+   final forward pass, use `updated_logits.argmax(dim=-1)`.
+
+Recommended order:
+
+    sequence -> input tokens and target tokens
+             -> repeated forward pass
+             -> loss
+             -> backward
+             -> optimizer step
+             -> final argmax predictions
+
+Once corrected, verify that the loss is generally lower after training and that
+the predicted IDs increasingly match the targets. The score can be reassessed
+after the program runs successfully.
