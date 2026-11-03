@@ -305,7 +305,7 @@ Code comments:
 
 
 ==============================================================
-LESSON 2 - From embeddings to logits with nn.Module
+LESSON 2 - TinyLanguageModel: Embeddings, Linear Projection, and Logits
 ==============================================================
 
 Goal
@@ -452,6 +452,13 @@ Clues, not answers
    vocabulary size?
 4. Why are logits called “unnormalized” scores?
 
+[my_answer]
+
+1. Because it is the index of the words inside the embedding table
+2. Because it is the updated weight for the entire vocabs than will be used to infer the next cycle
+3. Both layers (embedding and linear) knows about both vocab_size and hidden_size
+4. Because it ranges beyond interval (-1, 1)
+
 Refactoring checkpoint
 ----------------------
 Add a `hidden_states` print statement in `forward`, then remove it after you
@@ -466,5 +473,305 @@ reading the generation and training logic around the official implementation.
 
 
 --------------------------------------------------------------
-Score:
+Score: 7/10
 Comment:
+Your implementation is structurally correct. `TinyLanguageModel` inherits from
+`nn.Module`, calls `super().__init__()`, creates an embedding layer and a linear
+output layer, and returns logits with the expected shape. Your experiment also
+changed vocab_size to 50 correctly, so the output shape becomes [2, 4, 50].
+
+Answer review:
+
+1. Correct. Token IDs are integer indices used to select rows from the
+   embedding table. A float such as 3.5 cannot identify one row.
+
+2. Needs correction. `out_features=vocab_size` means the output layer produces
+   one score for every possible vocabulary token. It does not mean that the
+   weights are “updated for the next cycle”; weight updates happen later during
+   training through the loss function and backpropagation.
+
+3. Mostly correct, but be more precise. Both layers use both dimensions, but in
+   different roles:
+
+       embedding: vocab_size -> hidden_size
+       linear:     hidden_size -> vocab_size
+
+   Therefore `nn.Embedding(vocab_size, hidden_size)` and
+   `nn.Linear(hidden_size, vocab_size)` each need both values.
+
+4. Needs correction. Logits are unnormalized because they are raw real-valued
+   scores. They do not need to lie between -1 and 1, do not sum to 1, and are
+   not probabilities. Softmax converts logits into probabilities.
+
+Code comments:
+
+* The model and tensor dimensions are correct.
+* The `hidden_states_shape` print is useful for inspection, but the lesson
+  asked you to remove temporary printing from `forward` after observing it.
+  `forward` should only calculate and return the result.
+* Keep the permanent shape printing and assertions in `main()`.
+* Add blank lines between the import section, class, functions, and final
+  `if` block later for readability; this is style, not a correctness problem.
+
+Suggested final cleanup:
+
+    def forward(self, token_ids):
+        hidden_states = self.embedding(token_ids)
+        logits = self.output(hidden_states)
+        return logits
+
+
+==============================================================
+LESSON 3 - CrossEntropyLoss: From Logits to a Training Signal
+==============================================================
+
+Goal
+----
+Understand the difference between logits and probabilities, create target token
+IDs, calculate cross-entropy loss, and perform one training step on the tiny
+`TinyLanguageModel`.
+
+Reference rule
+--------------
+Continue comparing the vocabulary-sized output with the official DeepSeek-V3
+inference code:
+
+    https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
+
+In that repository, generation eventually uses the model's final logits to
+select or sample the next token. This lesson studies what those logits mean and
+how a model could learn to produce better ones. We are still using a tiny model,
+not the DeepSeek-V3 checkpoint.
+
+Part 1: create the training experiment
+--------------------------------------
+Create this file:
+
+    src/lesson03_loss.py
+
+Copy your `TinyLanguageModel` class from `src/lesson02_logits.py`, then use this
+program structure:
+
+    import torch
+    from torch import nn
+
+
+    class TinyLanguageModel(nn.Module):
+        def __init__(self, vocab_size, hidden_size):
+            super().__init__()
+            self.embedding = nn.Embedding(vocab_size, hidden_size)
+            self.output = nn.Linear(hidden_size, vocab_size)
+
+        def forward(self, token_ids):
+            hidden_states = self.embedding(token_ids)
+            logits = self.output(hidden_states)
+            return logits
+
+
+    def main():
+        batch_size = 2
+        seq_len = 4
+        vocab_size = 50
+        hidden_size = 8
+
+        token_ids = torch.tensor([
+            [4, 10, 7, 2],
+            [4, 11, 7, 2],
+        ], dtype=torch.long)
+
+        # The correct token at each position is the training target.
+        targets = torch.tensor([
+            [10, 7, 2, 1],
+            [11, 7, 2, 1],
+        ], dtype=torch.long)
+
+        model = TinyLanguageModel(vocab_size, hidden_size)
+        logits = model(token_ids)
+
+        loss_function = nn.CrossEntropyLoss()
+        loss = loss_function(
+            logits.reshape(-1, vocab_size),
+            targets.reshape(-1),
+        )
+
+        print("logits shape:", logits.shape)
+        print("targets shape:", targets.shape)
+        print("loss:", loss.item())
+
+        assert logits.shape == (batch_size, seq_len, vocab_size)
+        assert targets.shape == (batch_size, seq_len)
+        assert loss.ndim == 0
+
+
+    if __name__ == "__main__":
+        main()
+
+Run it:
+
+    python src/lesson03_loss.py
+
+Part 2: understand the shapes
+------------------------------
+
+The model produces:
+
+    logits \in \mathbb{R}^{2 \times 4 \times 50}
+
+The target tensor contains one correct token ID for every batch-position pair:
+
+    targets \in \mathbb{N}^{2 \times 4}
+
+`CrossEntropyLoss` expects the class dimension to be second, so the common
+language-model pattern flattens the batch and sequence dimensions:
+
+    logits.reshape(-1, 50) \in \mathbb{R}^{8 \times 50}
+    targets.reshape(-1) \in \mathbb{N}^{8}
+
+There are 8 predictions total: 2 sequences times 4 positions. Each prediction
+has 50 possible classes.
+
+Part 3: logits are not probabilities
+-------------------------------------
+
+At one position, suppose the model produces logits:
+
+    z = [2.0, 1.0, 0.0]
+
+These values are not probabilities. They can be negative, greater than 1, and
+they do not sum to 1. Softmax converts them into probabilities:
+
+    p_i = \frac{e^{z_i}}{\sum_j e^{z_j}}
+
+PyTorch's `CrossEntropyLoss` combines the required log-softmax operation and
+negative log-likelihood calculation internally. Therefore, pass raw logits to
+it. Do not call softmax before `CrossEntropyLoss`.
+
+Part 4: perform one optimization step
+--------------------------------------
+Add these lines after the first loss print:
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+Then calculate the loss again using the same `token_ids` and `targets`. Do not
+expect it to always decrease dramatically after one step, but understand the
+sequence:
+
+    logits -> loss -> gradients -> parameter update
+
+Inspect one gradient before `optimizer.step()`:
+
+    print(model.embedding.weight.grad.shape)
+
+It should have shape:
+
+    (vocab_size, hidden_size)
+
+Only rows used by the input token IDs receive embedding gradients in this
+example. This is an important connection to the embedding lookup from Lesson 1.
+
+Clues, not answers
+------------------
+1. Why does every position need a target token ID?
+2. Why must target values be in the range `[0, vocab_size)`?
+3. Why do we flatten `[batch, sequence]` into one dimension for the loss?
+4. What does `loss.backward()` calculate?
+5. Why should softmax not be applied before `CrossEntropyLoss`?
+
+Refactoring checkpoint
+----------------------
+Create a function with this interface:
+
+    def calculate_loss(model, token_ids, targets):
+        ...
+
+It should return one scalar loss. Keep model construction, optimization, and
+printing in `main()`. Do not build a data loader yet; first make the tensor
+flow and gradient flow completely clear.
+
+How this prepares us for DeepSeek-V3
+-------------------------------------
+The real DeepSeek-V3 model also ultimately produces vocabulary-sized logits.
+Its much larger architecture exists to produce better hidden states before the
+final projection. In later lessons, we will replace our direct embedding-to-
+linear path with Transformer blocks, attention, and eventually the DeepSeekMoE
+and MLA components described by the official implementation.
+
+
+[question]: What is the meaning of logits, and why must logits have a final
+dimension equal to vocab_size?
+
+[answer]:
+
+A logit is a raw score representing how suitable one possible token is as the
+next token. Logits are not probabilities yet.
+
+Suppose the vocabulary contains five tokens:
+
+    ID 0: cat
+    ID 1: dog
+    ID 2: runs
+    ID 3: sleeps
+    ID 4: .
+
+After processing a sequence, the model might produce:
+
+    z = [1.2, -0.4, 3.8, 0.7, 2.1]
+
+This vector contains five logits because there are five possible next tokens:
+
+    z \in \mathbb{R}^{V}
+
+where V is vocab_size. The scores are:
+
+    cat     -> 1.2
+    dog     -> -0.4
+    runs    -> 3.8
+    sleeps  -> 0.7
+    .       -> 2.1
+
+The largest score is 3.8, so the model currently prefers the token "runs".
+
+The model needs one score per vocabulary item because the next token could be
+any token in the vocabulary. For Lesson 2, the logits have shape:
+
+    logits \in \mathbb{R}^{2 \times 4 \times 50}
+
+This means 2 sequences, 4 positions per sequence, and 50 possible token
+choices at every position.
+
+The hidden size has a different purpose. A hidden state is an internal
+representation of the context:
+
+    h_{b,s,:} \in \mathbb{R}^{8}
+
+It is not directly a list of possible words. The output layer converts the
+hidden representation into vocabulary-sized scores:
+
+    z = hW^T + b
+
+where
+
+    h \in \mathbb{R}^{8}
+    W \in \mathbb{R}^{V \times 8}
+    z \in \mathbb{R}^{V}
+
+In PyTorch, this conversion is represented by:
+
+    self.output = nn.Linear(hidden_size, vocab_size)
+
+Therefore:
+
+    hidden representation: [hidden_size]
+    output logits:         [vocab_size]
+
+During training, CrossEntropyLoss compares the logits with the correct token
+ID. If the correct next token is ID 2, the loss uses the score at position 2
+and encourages it to become larger than the scores for the other tokens.
+
+DeepSeek-V3 follows this same general idea: its Transformer layers produce
+hidden states, and the final projection converts each hidden state into
+vocabulary-sized logits.
