@@ -887,3 +887,168 @@ Recommended order:
 Once corrected, verify that the loss is generally lower after training and that
 the predicted IDs increasingly match the targets. The score can be reassessed
 after the program runs successfully.
+
+
+==============================================================
+LESSON 4 - Causal Self-Attention: Queries, Keys, and Values
+==============================================================
+
+Goal
+----
+Build a tiny causal self-attention layer and understand how a token gathers
+information from earlier tokens. This is the essential Transformer operation
+that later becomes part of DeepSeek-V3's more specialized attention design.
+
+Reference rule
+--------------
+Continue reading the official DeepSeek-V3 implementation:
+
+    https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
+
+Find the attention-related code and notice that the real model has many more
+dimensions and optimizations. Do not copy it yet. Our goal is to understand the
+small mathematical operation underneath it.
+
+Part 1: create the file
+-----------------------
+Create `src/lesson04_attention.py` and build a module with this structure:
+
+    import math
+    import torch
+    from torch import nn
+
+
+    class CausalSelfAttention(nn.Module):
+        def __init__(self, hidden_size):
+            super().__init__()
+            self.query = nn.Linear(hidden_size, hidden_size)
+            self.key = nn.Linear(hidden_size, hidden_size)
+            self.value = nn.Linear(hidden_size, hidden_size)
+
+        def forward(self, hidden_states):
+            query = self.query(hidden_states)
+            key = self.key(hidden_states)
+            value = self.value(hidden_states)
+
+            scores = query @ key.transpose(-2, -1)
+            scores = scores / math.sqrt(hidden_states.shape[-1])
+
+            sequence_length = hidden_states.shape[-2]
+            causal_mask = torch.triu(
+                torch.ones(sequence_length, sequence_length, dtype=torch.bool),
+                diagonal=1,
+            )
+            scores = scores.masked_fill(causal_mask, float("-inf"))
+
+            weights = torch.softmax(scores, dim=-1)
+            output = weights @ value
+            return output
+
+
+    def main():
+        batch_size = 2
+        sequence_length = 4
+        hidden_size = 8
+        hidden_states = torch.randn(batch_size, sequence_length, hidden_size)
+
+        attention = CausalSelfAttention(hidden_size)
+        output = attention(hidden_states)
+
+        print("hidden_states shape:", hidden_states.shape)
+        print("output shape:", output.shape)
+        assert output.shape == hidden_states.shape
+
+
+    if __name__ == "__main__":
+        main()
+
+Run it with:
+
+    python src/lesson04_attention.py
+
+Part 2: understand the equations
+---------------------------------
+
+For every hidden state h, three learned projections are created:
+
+    Q = hW_Q
+    K = hW_K
+    V = hW_V
+
+Q means query: what information is this position looking for?
+
+K means key: what information does this position advertise that it contains?
+
+V means value: what content should be copied if this position is attended to?
+
+For sequence length S and hidden size D:
+
+    Q, K, V \in \mathbb{R}^{S \times D}
+
+The similarity between every query and every key is calculated by:
+
+    scores = QK^T
+
+Thus:
+
+    Q \in \mathbb{R}^{S \times D}
+    K^T \in \mathbb{R}^{D \times S}
+    scores \in \mathbb{R}^{S \times S}
+
+Each row says how strongly one position relates to every position in the
+sequence. Division by \sqrt{D} keeps the dot products from becoming too large.
+
+Softmax converts each score row into attention weights:
+
+    A_{i,j} = softmax(scores_{i,:})_j
+
+The output is a weighted mixture of value vectors:
+
+    output = AV
+
+Part 3: why the causal mask matters
+------------------------------------
+
+For next-token prediction, position i must not see future positions. With four
+positions, the allowed pattern is:
+
+    position 0: can see 0
+    position 1: can see 0, 1
+    position 2: can see 0, 1, 2
+    position 3: can see 0, 1, 2, 3
+
+The upper-triangular mask marks forbidden future positions. Replacing their
+scores with negative infinity makes their softmax weights equal to zero.
+
+Clues, not answers
+------------------
+1. Why does `scores` have shape `[batch, sequence, sequence]`?
+2. Why is the output shape the same as the input shape?
+3. What would go wrong if position 1 could see position 2 during training?
+4. Why do we use three projections instead of hidden states directly?
+5. What happens to a softmax row after one score is set to `-inf`?
+
+Practice exercise - prove the mask works
+-----------------------------------------
+
+Create `src/lesson04_practice.py`. Use a small manually understandable tensor
+and your attention module to demonstrate that changing a future token cannot
+change the output at an earlier position when the causal mask is active.
+
+Your program must:
+
+* create two inputs identical at position 0 but different at later positions;
+* run both through the same attention module;
+* compare the output at position 0;
+* show that the output at position 0 is unchanged, up to floating-point
+  precision;
+* show that a later position is allowed to change;
+* assert the expected tensor shapes.
+
+Use `torch.allclose` for the comparison. Do not remove the causal mask to make
+the test pass; the purpose is to observe why the mask exists.
+
+
+--------------------------------------------------------------
+Score:
+Comment:

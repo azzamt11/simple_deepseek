@@ -1,0 +1,300 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,booktabs}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+\definecolor{codegray}{gray}{0.95}
+\lstset{
+  language=Python,
+  basicstyle=\small\ttfamily,
+  backgroundcolor=\color{codegray},
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false
+}
+
+\title{Causal Self-Attention from First Principles\\
+\large A Small, Executable Study of Queries, Keys, Values, and Masking}
+\author{Learning Machine Learning: DeepSeek-V3 Foundations}
+\date{November 2026}
+
+\begin{document}
+
+\maketitle
+\begin{abstract}
+This paper develops and analyzes a minimal causal self-attention layer in
+PyTorch. The layer transforms a sequence of hidden vectors into queries, keys,
+and values; compares every query with every key; prevents information flow from
+future positions; and combines value vectors according to the resulting
+probabilities. Although the implementation is intentionally small, it exposes
+the central tensor operations used by Transformer language models. We derive
+the computation, track its dimensions, explain the scaled dot product and
+causal mask, and formulate an executable invariance test showing that changing
+a future token cannot affect an earlier output. The work is presented as a
+teaching-scale reconstruction of the attention operation underlying more
+specialized architectures such as DeepSeek-V3, not as a reproduction of the
+full model.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+Autoregressive language models predict the next token from the tokens that
+precede it. A model therefore needs a mechanism that allows the representation
+at position $i$ to gather relevant information from positions $0,\ldots,i$,
+while disallowing information from positions $i+1,\ldots,S-1$. Causal
+self-attention provides this mechanism.
+
+The objective of this lesson is not to reproduce the dimensions, optimizations,
+or specialized attention design of DeepSeek-V3. Instead, it isolates the
+mathematical operation in a small module whose tensors can be inspected on a
+local computer. The resulting program is a bridge between the earlier lessons
+on embeddings, logits, and loss, and the repeated Transformer layers used in a
+large language model.
+
+\section{Problem formulation}
+Let a batch of hidden states be represented by
+\[
+H \in \mathbb{R}^{B\times S\times D},
+\]
+where $B$ is the batch size, $S$ is the sequence length, and $D$ is the hidden
+size. In the lesson example, $B=2$, $S=4$, and $D=8$.
+
+For each position, attention must answer the following question: which earlier
+positions contain information useful to the current position? The answer is
+represented by a probability distribution over sequence positions. Each output
+vector is then a weighted mixture of the information stored at those positions.
+
+\section{Method}
+
+\subsection{Query, key, and value projections}
+Three learned linear maps transform each hidden state:
+\begin{align}
+Q &= HW_Q + b_Q,\\
+K &= HW_K + b_K,\\
+V &= HW_V + b_V,
+\end{align}
+where each projected tensor has shape $B\times S\times D$. In a single
+position notation, $q_i$ is the question asked by position $i$, $k_j$ is the
+information signature advertised by position $j$, and $v_j$ is the content
+that position $j$ contributes if selected.
+
+The projections are distinct because relevance and content need not be encoded
+in the same coordinates. The query-key interaction determines where to look;
+the value vectors determine what is retrieved.
+
+\subsection{Scaled dot-product scores}
+For each batch element, all query-key similarities are computed at once:
+\[
+L = QK^\mathsf{T}, \qquad L\in\mathbb{R}^{B\times S\times S}.
+\]
+The last two dimensions multiply as
+\[
+(S\times D)(D\times S)=S\times S.
+\]
+Thus, $L_{i,j}$ measures how compatible the query at position $i$ is with the
+key at position $j$. The scores are scaled by the square root of the hidden
+size:
+\[
+\widetilde{L}_{i,j}=\frac{L_{i,j}}{\sqrt{D}}.
+\]
+Without this scaling, dot products tend to grow in magnitude as $D$ grows,
+which can make the softmax distribution excessively concentrated and its
+gradients less useful.
+
+\subsection{Causal masking}
+Define the causal mask $M$ by
+\[
+M_{i,j}=\begin{cases}
+0,&j\leq i,\\
+-\infty,&j>i.
+\end{cases}
+\]
+The masked scores are
+\[
+\widehat{L}=\widetilde{L}+M.
+\]
+Applying softmax row-wise gives attention weights:
+\[
+A_{i,:}=\operatorname{softmax}(\widehat{L}_{i,:}),
+\qquad A\in\mathbb{R}^{B\times S\times S}.
+\]
+For $j>i$, the corresponding score is $-\infty$, so
+\[
+A_{i,j}=\frac{e^{-\infty}}{\sum_k e^{\widehat{L}_{i,k}}}=0.
+\]
+Consequently, the $i$th output cannot depend on future values.
+
+\subsection{Value aggregation}
+The final output is
+\[
+O=AV,
+\qquad O\in\mathbb{R}^{B\times S\times D}.
+\]
+At one position this is
+\[
+o_i=\sum_{j=0}^{i}A_{i,j}v_j.
+\]
+The output has the same shape as $H$, making the attention layer composable
+with subsequent projections and Transformer blocks.
+
+\section{Reference implementation}
+The following is the complete lesson-scale implementation. PyTorch's
+\texttt{transpose(-2, -1)} exchanges the sequence and feature axes of $K$,
+and \texttt{masked\_fill} assigns negative infinity to forbidden positions.
+
+\begin{lstlisting}
+import math
+import torch
+from torch import nn
+
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.query = nn.Linear(hidden_size, hidden_size)
+        self.key = nn.Linear(hidden_size, hidden_size)
+        self.value = nn.Linear(hidden_size, hidden_size)
+
+    def forward(self, hidden_states):
+        query = self.query(hidden_states)
+        key = self.key(hidden_states)
+        value = self.value(hidden_states)
+
+        scores = query @ key.transpose(-2, -1)
+        scores = scores / math.sqrt(hidden_states.shape[-1])
+
+        sequence_length = hidden_states.shape[-2]
+        causal_mask = torch.triu(
+            torch.ones(sequence_length, sequence_length,
+                       dtype=torch.bool, device=hidden_states.device),
+            diagonal=1,
+        )
+        scores = scores.masked_fill(causal_mask, float("-inf"))
+
+        weights = torch.softmax(scores, dim=-1)
+        return weights @ value
+
+
+def main():
+    batch_size, sequence_length, hidden_size = 2, 4, 8
+    hidden_states = torch.randn(batch_size, sequence_length, hidden_size)
+    output = CausalSelfAttention(hidden_size)(hidden_states)
+    print("hidden_states shape:", hidden_states.shape)
+    print("output shape:", output.shape)
+    assert output.shape == hidden_states.shape
+
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+
+The explicit device argument in the mask construction keeps the mask colocated
+with the input tensor when the program is moved from CPU to another device. It
+does not change the lesson's mathematics.
+
+\section{Shape analysis}
+For the example configuration, the complete tensor flow is:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Tensor & Operation & Shape \\
+\midrule
+$H$ & input hidden states & $2\times4\times8$ \\
+$Q,K,V$ & three linear projections & $2\times4\times8$ each \\
+$QK^\mathsf{T}$ & pairwise similarities & $2\times4\times4$ \\
+$A$ & masked row-wise softmax & $2\times4\times4$ \\
+$AV$ & weighted value mixture & $2\times4\times8$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The middle dimension of the score tensor is the querying position and the last
+dimension is the position being considered. This explains why attention scores
+have two sequence dimensions: every position compares itself with every other
+position before the causal restriction is applied.
+
+\section{Causality as an invariance property}
+The mask can be tested without inspecting individual floating-point values.
+Let $H$ and $H'$ agree at position $0$ but differ at positions $1,\ldots,S-1$.
+Because row $0$ of the mask permits only key $0$, we have
+\[
+O(H)_{0}=O(H')_{0},
+\]
+up to floating-point precision. A later output, such as $O(H)_2$, is allowed
+to change because position $2$ can attend to positions $0$, $1$, and $2$.
+
+An executable version of this argument is:
+
+\begin{lstlisting}
+torch.manual_seed(0)
+attention = CausalSelfAttention(hidden_size=4)
+first = torch.randn(1, 4, 4)
+second = first.clone()
+second[:, 1:, :] = torch.randn(1, 3, 4)
+
+out_first = attention(first)
+out_second = attention(second)
+
+assert torch.allclose(out_first[:, 0, :], out_second[:, 0, :])
+assert not torch.allclose(out_first[:, 2, :], out_second[:, 2, :])
+\end{lstlisting}
+
+The second assertion is probabilistic in the practical sense: with randomly
+initialized parameters and different later inputs, a later output is expected
+to change. The first assertion is the structural guarantee supplied by the
+causal mask.
+
+\section{Discussion}
+This module is a single-head, single-layer educational abstraction. Production
+language models add residual connections, normalization, multiple attention
+heads or latent attention variants, positional information, feed-forward
+networks, and many efficiency improvements. DeepSeek-V3 additionally uses
+architecture-specific attention and mixture-of-experts components. Those
+features change scale and implementation details, but not the basic logic
+demonstrated here: learned projections produce compatibility scores, masking
+enforces the autoregressive dependency structure, and a weighted sum retrieves
+context.
+
+The implementation also omits an explicit positional encoding. Without some
+source of positional information, attention is permutation-equivariant: it can
+compare content but does not inherently know whether a token came first or
+last. Real Transformer systems therefore include positional information in
+their attention computation or hidden states.
+
+\section{Conclusion}
+The lesson establishes causal self-attention as a sequence-to-sequence tensor
+operation. Starting with $H\in\mathbb{R}^{B\times S\times D}$, the module
+constructs $Q$, $K$, and $V$, forms scaled pairwise scores, removes access to
+future positions, normalizes the remaining scores, and returns $AV$ with the
+original hidden-state shape. The masking invariance test turns the central
+autoregressive requirement into an executable claim. This small construction
+provides the mathematical foundation needed to study larger Transformer and
+DeepSeek-style architectures.
+
+\begin{thebibliography}{9}
+\bibitem{vaswani2017}
+Ashish Vaswani et al., ``Attention Is All You Need,''
+\emph{Advances in Neural Information Processing Systems}, 2017.
+\url{https://arxiv.org/abs/1706.03762}
+
+\bibitem{deepseek}
+DeepSeek-AI, ``DeepSeek-V3,'' source repository, 2024.
+\url{https://github.com/deepseek-ai/DeepSeek-V3}
+
+\bibitem{pytorch}
+PyTorch Contributors, ``PyTorch Documentation: Multi-dimensional arrays and
+neural network modules,'' 2026.
+\url{https://pytorch.org/docs/stable/}
+\end{thebibliography}
+
+\end{document}
