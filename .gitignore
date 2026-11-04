@@ -9,3 +9,6 @@ __pycache__/
 .env
 .vscode/
 .idea/
+
+# Generated paper PDFs
+papers/*.pdf

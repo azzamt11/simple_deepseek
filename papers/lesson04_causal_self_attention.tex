@@ -223,6 +223,125 @@ dimension is the position being considered. This explains why attention scores
 have two sequence dimensions: every position compares itself with every other
 position before the causal restriction is applied.
 
+\section{A small tensor illustration}
+The following calculation removes the batch dimension temporarily so that every
+number can be seen. We use three positions and two features per position. Assume
+that the projections have already produced
+\[
+Q=K=V=
+\begin{bmatrix}
+1&0\\
+0&1\\
+1&1
+\end{bmatrix},
+\qquad Q,K,V\in\mathbb{R}^{3\times2}.
+\]
+The rows are positions $0$, $1$, and $2$; the columns are feature coordinates.
+This is a deliberately small example, not a claim that a trained model produces
+these exact values.
+
+\subsection{1. Compare every query with every key}
+The key is transposed so that its feature dimension is on the inside of the
+matrix multiplication:
+\[
+K^\mathsf{T}=
+\begin{bmatrix}
+1&0&1\\
+0&1&1
+\end{bmatrix},
+\qquad
+QK^\mathsf{T}
+=
+\begin{bmatrix}
+1&0&1\\
+0&1&1\\
+1&1&2
+\end{bmatrix}.
+\]
+For example, the entry in row $1$, column $2$ is the dot product
+\[
+Q_1\cdot K_2=[0,1]\cdot[1,1]=0\cdot1+1\cdot1=1.
+\]
+The row index identifies the querying position, while the column index identifies
+the key being considered. The matrix multiplication is therefore
+\[
+(3\times2)(2\times3)=3\times3.
+\]
+
+\subsection{2. Scale and apply the causal mask}
+Because the feature size is $D=2$, divide the score matrix by $\sqrt{2}$:
+\[
+\widetilde L\approx
+\begin{bmatrix}
+0.707&0&0.707\\
+0&0.707&0.707\\
+0.707&0.707&1.414
+\end{bmatrix}.
+\]
+Position $0$ may see only position $0$; position $1$ may see positions $0$ and
+$1$; and position $2$ may see all three positions. Therefore the masked scores
+are approximately
+\[
+\widehat L\approx
+\begin{bmatrix}
+0.707&-\infty&-\infty\\
+0&0.707&-\infty\\
+0.707&0.707&1.414
+\end{bmatrix}.
+\]
+The $-\infty$ entries are not values that will be retrieved. They only ensure
+that their softmax probabilities become zero.
+
+\subsection{3. Turn scores into attention weights}
+Applying softmax separately to each row gives approximately
+\[
+A=\operatorname{softmax}(\widehat L)\approx
+\begin{bmatrix}
+1.000&0&0\\
+0.330&0.670&0\\
+0.248&0.248&0.503
+\end{bmatrix}.
+\]
+Each row sums to $1$. Notice the triangular pattern: the zeros above the
+diagonal are exactly the forbidden future positions.
+
+\subsection{4. Mix the value vectors}
+Finally, multiply the weights by the values:
+\[
+O=AV\approx
+\begin{bmatrix}
+1.000&0&0\\
+0.330&0.670&0\\
+0.248&0.248&0.503
+\end{bmatrix}
+\begin{bmatrix}
+1&0\\
+0&1\\
+1&1
+\end{bmatrix}
+=
+\begin{bmatrix}
+1.000&0.000\\
+0.330&0.670\\
+0.751&0.751
+\end{bmatrix}.
+\]
+For example, the output at position $2$ is the weighted sum
+\[
+o_2=0.248[1,0]+0.248[0,1]+0.503[1,1]
+\approx[0.751,0.751].
+\]
+Thus, attention does not copy one value vector in general. It uses each row of
+$A$ as a recipe for mixing the value rows. The complete calculation has the
+shape flow
+\[
+\underbrace{(3\times2)}_{Q}
+\underbrace{(2\times3)}_{K^\mathsf{T}}
+\to\underbrace{(3\times3)}_{\text{scores and weights}}
+\underbrace{(3\times2)}_{V}
+\to\underbrace{(3\times2)}_{O}.
+\]
+
 \section{Causality as an invariance property}
 The mask can be tested without inspecting individual floating-point values.
 Let $H$ and $H'$ agree at position $0$ but differ at positions $1,\ldots,S-1$.
