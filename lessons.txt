@@ -1063,3 +1063,107 @@ different future positions. The corrected `src/lesson04_practice.py` now uses
 a small understandable tensor, runs both inputs through the same attention
 module, checks that position 0 is unchanged, checks that position 2 changes,
 and asserts the expected shapes.
+
+
+==============================================================
+LESSON 5 - Rotary Positional Embeddings: Giving Attention Order
+==============================================================
+
+Goal
+----
+Add positional information to attention with Rotary Positional Embeddings
+(RoPE). Your causal attention layer currently compares hidden vectors, but
+without positional information it does not know the difference between a
+vector appearing first and the same vector appearing later. RoPE is the next
+important building block on the path toward a DeepSeek-style Transformer.
+
+Reference rule
+--------------
+Read the RoFormer paper's RoPE explanation and inspect how rotary embeddings
+are used in the official DeepSeek-V3 implementation. Focus on the small
+mathematical operation first; do not copy the complete production attention
+implementation yet.
+
+Part 1: create `src/lesson05_rope.py`
+--------------------------------------
+Implement these equations for a tensor `x` shaped `[batch, sequence, hidden]`.
+The hidden size must be even because features are processed in pairs.
+
+For each pair of features, define an inverse frequency:
+
+    inverse_frequency = base ** (-pair_index / hidden_size)
+
+For position `p`, calculate an angle:
+
+    angle[p, pair_index] = p * inverse_frequency[pair_index]
+
+Then rotate the feature pairs:
+
+    RoPE(x, p) = x * cos(angle) + rotate_half(x) * sin(angle)
+
+where:
+
+    rotate_half([x0, x1]) = [-x1, x0]
+
+The provided reference implementation should expose:
+
+    rotary_embedding(x, position_ids=None, base=10000.0)
+
+Run it with:
+
+    python src/lesson05_rope.py
+
+Part 2: understand the operation
+---------------------------------
+
+RoPE does not add a separate position vector to the hidden state. Instead, it
+rotates each pair of features by an amount determined by the token position.
+Position 0 has angle zero, so its rotation is the identity. Later positions
+receive different rotations.
+
+The rotation preserves the norm of each feature pair. This means positional
+information is introduced without changing the magnitude of the vector.
+
+In a Transformer attention layer, RoPE is applied to query and key tensors
+before their dot product:
+
+    query = rotary_embedding(query)
+    key = rotary_embedding(key)
+    scores = query @ key.transpose(-2, -1)
+
+Values are not rotated. Queries and keys encode position-dependent matching;
+values continue to carry the content that attention retrieves.
+
+Clues, not answers
+------------------
+1. Why must the hidden size be even?
+2. Why is position 0 unchanged?
+3. Why does `rotate_half` use pairs of features?
+4. Why are queries and keys rotated, but not values?
+5. What property can you test to confirm that a rotation preserves length?
+
+Practice exercise - prove position matters
+--------------------------------------------
+
+Create `src/lesson05_practice.py`. Start with one hidden vector and apply
+`rotary_embedding` at position 0 and position 1.
+
+Your program must:
+
+* use an even hidden size;
+* assert that position 0 leaves the vector unchanged;
+* assert that position 1 produces a different vector;
+* assert the expected tensor shapes;
+* print both results so the rotation can be inspected.
+
+Use `torch.allclose` for the comparisons. The goal is to show that attention
+needs positional information in addition to content vectors.
+
+
+--------------------------------------------------------------
+Score:
+Not yet graded
+
+Comment:
+Complete the implementation and practice exercise, then record the score and
+feedback here.

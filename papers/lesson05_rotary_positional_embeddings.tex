@@ -1,0 +1,225 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+\definecolor{codegray}{gray}{0.95}
+\lstset{language=Python,basicstyle=\small\ttfamily,backgroundcolor=\color{codegray},frame=single,breaklines=true,columns=fullflexible,showstringspaces=false}
+
+\title{Rotary Positional Embeddings from First Principles\\
+\large Giving Causal Self-Attention Information About Order}
+\author{Learning Machine Learning: DeepSeek-V3 Foundations}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This paper develops a small executable implementation of Rotary Positional
+Embeddings (RoPE). Causal self-attention compares content vectors, but content
+alone does not tell the model whether a vector occurred first or last. RoPE
+introduces position by rotating pairs of query and key features by
+position-dependent angles. The rotation preserves vector norms and supplies
+positional information before the query-key dot product.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+Attention can compare two hidden vectors regardless of where they occur in a
+sequence. If the same vectors are moved to different positions, however, a
+content-only attention mechanism has no direct representation of that change.
+Autoregressive language models need order information.
+
+Rotary Positional Embeddings address this by rotating pairs of features in the
+query and key vectors. The rotation angle depends on token position and on the
+feature pair's frequency. Values are not rotated because they carry the
+content retrieved after query-key matching.
+
+\section{Problem formulation}
+Let
+\[
+X\in\mathbb{R}^{B\times S\times D}
+\]
+be a batch of hidden vectors. RoPE requires $D$ to be even so features can be
+grouped into pairs:
+\[
+[x_0,x_1],[x_2,x_3],\ldots,[x_{D-2},x_{D-1}].
+\]
+
+For position $p$ and feature pair $r$, use the rotation
+\[
+\begin{bmatrix}
+\cos\theta_{p,r} & -\sin\theta_{p,r}\\
+\sin\theta_{p,r} & \cos\theta_{p,r}
+\end{bmatrix}
+\begin{bmatrix}x_{2r}\\x_{2r+1}\end{bmatrix}.
+\]
+
+\section{Method}
+\subsection{Inverse frequencies and angles}
+With base $10000$, define
+\[
+\omega_r=10000^{-2r/D},\qquad
+\theta_{p,r}=p\omega_r.
+\]
+The first pair changes fastest and later pairs change more slowly.
+
+\begin{lstlisting}
+pair_indices = torch.arange(0, hidden_size, 2, device=x.device)
+inverse_frequencies = base ** (-pair_indices.float() / hidden_size)
+angles = position_ids[:, None].float() * inverse_frequencies[None, :]
+\end{lstlisting}
+
+\subsection{Pair rotation}
+Define
+\[
+\operatorname{rotate\_half}(x)=[-x_1,x_0,-x_3,x_2,\ldots].
+\]
+Repeating the cosine and sine across each pair gives the compact equation
+\[
+\operatorname{RoPE}(x,p)=x\odot\cos(\theta_p)
++\operatorname{rotate\_half}(x)\odot\sin(\theta_p).
+\]
+
+\begin{lstlisting}
+def rotate_half(x):
+    even = x[..., ::2]
+    odd = x[..., 1::2]
+    return torch.stack((-odd, even), dim=-1).flatten(-2)
+\end{lstlisting}
+
+At position $p=0$, every angle is zero, so $\cos(0)=1$ and $\sin(0)=0$;
+the input is unchanged.
+
+\subsection{Norm preservation}
+Each pair is multiplied by a two-dimensional orthogonal rotation matrix, so
+\[
+\left\|\operatorname{RoPE}(x,p)\right\|_2=\|x\|_2.
+\]
+RoPE changes direction while preserving vector magnitude up to floating-point
+precision.
+
+\subsection{RoPE in attention}
+If $Q$ and $K$ are projected queries and keys, apply RoPE before the score
+calculation:
+\[
+Q'=\operatorname{RoPE}(Q),\qquad K'=\operatorname{RoPE}(K),
+\]
+\[
+L=Q'(K')^\mathsf{T},\qquad
+O=\operatorname{softmax}(L+M)V.
+\]
+Values remain unrotated because they carry the content retrieved by attention.
+
+\section{Reference implementation}
+The implementation accepts $x$ with shape $B\times S\times D$ and shared
+position IDs with length $S$.
+
+\begin{lstlisting}
+import torch
+
+
+def rotate_half(x):
+    even = x[..., ::2]
+    odd = x[..., 1::2]
+    return torch.stack((-odd, even), dim=-1).flatten(-2)
+
+
+def rotary_embedding(x, position_ids=None, base=10000.0):
+    batch_size, sequence_length, hidden_size = x.shape
+    if hidden_size % 2 != 0:
+        raise ValueError("hidden_size must be even for RoPE")
+
+    if position_ids is None:
+        position_ids = torch.arange(sequence_length, device=x.device)
+    position_ids = position_ids.to(device=x.device)
+
+    pair_indices = torch.arange(0, hidden_size, 2, device=x.device)
+    inverse_frequencies = base ** (-pair_indices.float() / hidden_size)
+    angles = position_ids[:, None].float() * inverse_frequencies[None, :]
+    cos = angles.cos().repeat_interleave(2, dim=-1)
+    sin = angles.sin().repeat_interleave(2, dim=-1)
+    cos = cos.unsqueeze(0).expand(batch_size, -1, -1)
+    sin = sin.unsqueeze(0).expand(batch_size, -1, -1)
+
+    return x * cos + rotate_half(x) * sin
+
+
+def main():
+    torch.manual_seed(0)
+    hidden_states = torch.randn(2, 4, 8)
+    rotated = rotary_embedding(hidden_states)
+    print("input shape:", hidden_states.shape)
+    print("rotated shape:", rotated.shape)
+    assert rotated.shape == hidden_states.shape
+
+    before = torch.linalg.vector_norm(hidden_states, dim=-1)
+    after = torch.linalg.vector_norm(rotated, dim=-1)
+    assert torch.allclose(before, after, atol=1e-6)
+
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+
+The shape is unchanged:
+\[
+B\times S\times D\longrightarrow B\times S\times D.
+\]
+
+\section{A small tensor illustration}
+For $x=[1,0]$, position zero gives $[1,0]$. At a position with angle
+$\theta$, the output is
+\[
+[1,0]\begin{bmatrix}\cos\theta&-\sin\theta\\
+\sin\theta&\cos\theta\end{bmatrix}
+=[\cos\theta,\sin\theta].
+\]
+Its norm remains one because
+$\sqrt{\cos^2\theta+\sin^2\theta}=1$.
+
+\section{Executable properties}
+\begin{lstlisting}
+x = torch.tensor([[[1.0, 0.0, 1.0, 0.0]]])
+rotated_zero = rotary_embedding(x, position_ids=torch.tensor([0]))
+rotated_one = rotary_embedding(x, position_ids=torch.tensor([1]))
+
+assert torch.allclose(rotated_zero, x)
+assert not torch.allclose(rotated_zero, rotated_one)
+\end{lstlisting}
+
+The first assertion verifies the zero-angle identity. The second verifies that
+position changes the representation.
+
+\section{Discussion}
+RoPE supplies order information while preserving dimensionality and norm. In
+a full Transformer it is normally applied to query and key representations
+inside attention. Exact tensor layouts and cache details can differ, but the
+educational core remains a position-dependent rotation of feature pairs.
+
+This paper does not reproduce DeepSeek-V3's complete attention implementation;
+it isolates the positional operation needed before studying larger components.
+
+\section{Conclusion}
+Rotary Positional Embeddings turn token position into a rotation of paired
+features. Applying RoPE to queries and keys before their dot product gives
+causal self-attention access to both content and order, extending the Lesson 4
+attention mechanism toward a more complete Transformer block.
+
+\begin{thebibliography}{9}
+\bibitem{su2021roformer}
+Jianlin Su et al., ``RoFormer: Enhanced Transformer with Rotary Position
+Embedding,'' 2021.\url{https://arxiv.org/abs/2104.09864}
+
+\bibitem{deepseek}
+DeepSeek-AI, ``DeepSeek-V3,'' source repository, 2024.
+\url{https://github.com/deepseek-ai/DeepSeek-V3}
+\end{thebibliography}
+
+\end{document}
