@@ -91,6 +91,14 @@ The projections are distinct because relevance and content need not be encoded
 in the same coordinates. The query-key interaction determines where to look;
 the value vectors determine what is retrieved.
 
+These equations correspond to three independent learned projections:
+
+\begin{lstlisting}
+query = self.query(hidden_states)  # Q = H W_Q + b_Q
+key = self.key(hidden_states)      # K = H W_K + b_K
+value = self.value(hidden_states)  # V = H W_V + b_V
+\end{lstlisting}
+
 \subsection{Scaled dot-product scores}
 For each batch element, all query-key similarities are computed at once:
 \[
@@ -109,6 +117,13 @@ size:
 Without this scaling, dot products tend to grow in magnitude as $D$ grows,
 which can make the softmax distribution excessively concentrated and its
 gradients less useful.
+
+The corresponding tensor operations are:
+
+\begin{lstlisting}
+scores = query @ key.transpose(-2, -1)  # L = Q K^T
+scores = scores / math.sqrt(hidden_states.shape[-1])  # L_tilde
+\end{lstlisting}
 
 \subsection{Causal masking}
 Define the causal mask $M$ by
@@ -133,6 +148,19 @@ A_{i,j}=\frac{e^{-\infty}}{\sum_k e^{\widehat{L}_{i,k}}}=0.
 \]
 Consequently, the $i$th output cannot depend on future values.
 
+The mask and row-wise softmax are implemented as follows:
+
+\begin{lstlisting}
+sequence_length = hidden_states.shape[-2]
+causal_mask = torch.triu(
+    torch.ones(sequence_length, sequence_length,
+               dtype=torch.bool, device=hidden_states.device),
+    diagonal=1,
+)
+scores = scores.masked_fill(causal_mask, float("-inf"))  # L_hat
+weights = torch.softmax(scores, dim=-1)                  # A
+\end{lstlisting}
+
 \subsection{Value aggregation}
 The final output is
 \[
@@ -145,6 +173,12 @@ o_i=\sum_{j=0}^{i}A_{i,j}v_j.
 \]
 The output has the same shape as $H$, making the attention layer composable
 with subsequent projections and Transformer blocks.
+
+The final equation is a batched matrix multiplication:
+
+\begin{lstlisting}
+output = weights @ value  # O = A V
+\end{lstlisting}
 
 \section{Reference implementation}
 The following is the complete lesson-scale implementation. PyTorch's

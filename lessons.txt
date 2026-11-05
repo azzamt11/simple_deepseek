@@ -1051,4 +1051,15 @@ the test pass; the purpose is to observe why the mask exists.
 
 --------------------------------------------------------------
 Score:
+8/10
+
 Comment:
+The first attempt had the correct attention components and causal-mask idea,
+but it was not runnable and did not yet perform the required invariance test.
+The main issues were a missing `math` import, using `hidden_states[-2]`
+instead of `hidden_states.shape[-2]`, placing the execution block inside the
+class, an incorrect `torch.allclose` call, and the absence of two inputs with
+different future positions. The corrected `src/lesson04_practice.py` now uses
+a small understandable tensor, runs both inputs through the same attention
+module, checks that position 0 is unchanged, checks that position 2 changes,
+and asserts the expected shapes.
